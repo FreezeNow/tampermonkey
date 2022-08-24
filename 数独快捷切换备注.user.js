@@ -9,21 +9,21 @@
 // @grant        none
 // ==/UserScript==
 
-(function() {
-    'use strict';
-    const notes = document.querySelector('.game-controls-item[data-action="pencil"]')
-    if(notes) {
-        document.addEventListener('keydown',(event)=>{
-            const code = event.code
-            if(code==='NumpadDecimal') {
-                const mousedownEvent = new MouseEvent("mousedown", {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window,
-                });
-                notes.dispatchEvent(mousedownEvent);
-            }
-        })
-    }
-    // Your code here...
+(function () {
+  'use strict';
+  const notes = document.querySelector('.game-controls-item[data-action="pencil"]');
+  if (notes) {
+    document.addEventListener('keydown', (event) => {
+      const code = event.code;
+      if (code === 'NumpadDecimal') {
+        const mousedownEvent = new MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+        });
+        notes.dispatchEvent(mousedownEvent);
+      }
+    });
+  }
+  // Your code here...
 })();
