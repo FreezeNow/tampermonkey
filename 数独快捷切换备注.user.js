@@ -7,6 +7,7 @@
 // @match        *://sudoku.com/*
 // @icon         https://sudoku.com/favicon-32x32.png
 // @grant        none
+// @license MIT
 // ==/UserScript==
 
 (function () {
