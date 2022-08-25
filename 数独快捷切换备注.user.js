@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         数独快捷切换备注
 // @namespace    FreezeNowSudoku
-// @version      1.0
+// @version      1.1
 // @description  可以用来快捷切换备注开关，快捷键为小键盘的"."，目前只支持 sudoku.com
 // @author       FreezeNow
 // @match        *://sudoku.com/*
