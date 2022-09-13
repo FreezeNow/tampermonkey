@@ -51,6 +51,24 @@
         info = JSON.parse(main_gameString);
         break;
       }
+      case 'event': {
+        const live_opsString = localStorage.getItem('live_ops');
+        const live_ops_level = sessionStorage.getItem('live_ops_level');
+        if (!live_opsString) {
+          return;
+        }
+        const liveOps = JSON.parse(live_opsString);
+        for (const key in liveOps.progress) {
+          if (Object.hasOwnProperty.call(liveOps.progress, key)) {
+            const element = liveOps.progress[key];
+            if (element.id == live_ops_level) {
+              info = element;
+              break;
+            }
+          }
+        }
+        break;
+      }
     }
     if (!info) {
       return;
