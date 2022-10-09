@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         数独-自动隐藏已填写9次的数字
 // @namespace    FreezeNowSudokuHideNumberButton
-// @version      1.1
+// @version      1.2
 // @description  可以用来隐藏已在九宫格中存在九个的数字按钮，目前只支持 sudoku.com
 // @author       FreezeNow
 // @match        *://sudoku.com/*
