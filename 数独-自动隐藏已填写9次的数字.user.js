@@ -74,6 +74,9 @@
       return;
     }
     const infoValues = info.values;
+    if (!infoValues?.length) {
+      return;
+    }
     const numberMap = {};
     for (let i = 0; i < infoValues.length; i++) {
       const element = infoValues[i];
