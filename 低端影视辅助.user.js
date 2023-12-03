@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         低端影视辅助
-// @namespace    FreezeNowSudoku
+// @namespace    FreezeNowDDYSHelper
 // @version      1.0
 // @description  自动切换到上次观看的集数
 // @author       FreezeNow
