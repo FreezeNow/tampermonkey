@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         B站黑流量与水军检测
 // @namespace    FreezeNowBilibiliBlackTrafficDetector
-// @version      1.0.0
-// @description  精准识别B站评论区中的反华/逆民/阴阳怪气、反米哈游极端黑粉、手机圈商战互黑等黑流量与水军模板，支持分类折叠、设备交叉比对与自定义规则库
+// @version      1.1.0
+// @description  精准识别B站评论区中的反华/逆民/阴阳怪气、反米哈游极端黑粉、手机圈商战互黑等黑流量与水军模板，支持全站UP主置信度与通稿矩阵排查、设备交叉比对与自定义规则
 // @author       FreezeNow
 // @match        *://www.bilibili.com/video/*
 // @match        *://www.bilibili.com/list/*
 // @match        *://www.bilibili.com/bangumi/play/*
 // @icon         https://www.bilibili.com/favicon.ico
+// @grant        unsafeWindow
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -123,7 +124,7 @@
   };
 
   // ==========================================
-  // 2. 本地配置持久化与管理器
+  // 2. 本地配置持久化管理器
   // ==========================================
 
   class ConfigManager {
@@ -180,7 +181,7 @@
   class ReplyStore {
     constructor() {
       this.replies = new Map(); // rpid -> replyData
-      this.clusters = [];       // [{ rootRpid, rpids: [], textSample, keywords }]
+      this.clusters = [];       // [{ rootRpid, rpids: [], textSample }]
       this.shinglesMap = new Map(); // rpid -> Set of 2-grams
     }
 
@@ -207,7 +208,6 @@
       return set;
     }
 
-    // Jaccard 相似度计算
     calcJaccard(setA, setB) {
       if (!setA.size || !setB.size) return 0;
       let intersection = 0;
@@ -218,7 +218,6 @@
       return union === 0 ? 0 : intersection / union;
     }
 
-    // 增量聚类比对
     checkCluster(rpid, shingles, text) {
       if (!configMgr.get().modules.text_clustering) return;
       let matchedCluster = null;
@@ -237,7 +236,6 @@
       if (matchedCluster) {
         matchedCluster.rpids.push(rpid);
       } else {
-        // 创建新潜在族群
         this.clusters.push({
           rootRpid: rpid,
           rpids: [rpid],
@@ -295,24 +293,19 @@
         if (!cfg.modules[dict.category]) continue;
 
         let categoryHits = [];
-
-        // 关键词匹配
         for (const kw of dict.keywords) {
           if (msg.toLowerCase().includes(kw.toLowerCase())) {
             categoryHits.push(kw);
           }
         }
-
-        // 正则模式匹配
         for (const reg of dict.regexPatterns) {
           if (reg.test(msg)) {
-            categoryHits.push('正则:' + reg.source.slice(0, 15));
+            categoryHits.push('特征:' + reg.source.slice(0, 15));
           }
         }
 
         if (categoryHits.length > 0) {
           matchedCategories.add(dict.category);
-          // 去重
           const uniqueHits = Array.from(new Set(categoryHits));
           const hitScore = Math.min(dict.weight + (uniqueHits.length - 1) * 15, 60);
           score += hitScore;
@@ -342,13 +335,12 @@
         }
       }
 
-      // 4. 手机圈特有机型与言论冲突交叉校验 (Device Cross-check)
+      // 4. 手机圈机型与言论冲突交叉校验 (Device Cross-check)
       if (cfg.modules.smartphone_rivalry && device) {
         const isXiaomiDevice = /xiaomi|redmi|k\d0/i.test(device);
         const isHuaweiDevice = /huawei|honor|mate|p\d0|nova/i.test(device);
         const isAppleDevice = /iphone|ipad/i.test(device);
 
-        // 如果手持竞品设备，并在评论中发表严重攻击贬损言论
         if (isAppleDevice && (msg.includes('粗粮') || msg.includes('猴米') || msg.includes('屌丝机') || msg.includes('自研打胶'))) {
           score += 20;
           reasons.push(`设备交叉异常: 持苹果设备发表极端黑米言论 (+20)`);
@@ -370,7 +362,7 @@
         }
       }
 
-      // 6. 账号资产维度微调 (中高级养号水军判定)
+      // 6. 账号资产维度微调
       const level = reply.level ?? 0;
       const fansDetail = reply.fans_detail;
       const isDefaultAvatar = !reply.avatar || reply.avatar.includes('noface');
@@ -379,7 +371,6 @@
         score += 15;
         reasons.push(`账号等级极低 (Lv${level}, +15)`);
       } else if (level >= 4 && !fansDetail && !reply.sign && score >= 30) {
-        // Lv4-5 养号账号：无粉丝牌、无签名、无装扮
         score += 10;
         reasons.push(`养号高危特征 (Lv${level}但零粉丝牌零签名, +10)`);
       }
@@ -389,7 +380,7 @@
         reasons.push('默认无头像 (+10)');
       }
 
-      // 7. 白名单扣分/路人保护 (避免误伤真实活跃用户)
+      // 7. 白名单扣分/路人保护
       if (reply.is_up_liked) {
         score -= 40;
         reasons.push('UP主点赞认可 (-40)');
@@ -413,13 +404,13 @@
   const detector = new DetectionEngine();
 
   // ==========================================
-  // 5. 原生网络请求拦截 (Hook fetch & XHR)
+  // 5. 原生请求沙箱穿透与数据拦截机制
   // ==========================================
 
   function parseReplyItem(item) {
     if (!item) return null;
     return {
-      rpid: String(item.rpid),
+      rpid: String(item.rpid || item.id_str || ''),
       mid: item.mid,
       uname: item.member?.uname || '',
       avatar: item.member?.avatar || '',
@@ -456,7 +447,6 @@
       if (parsed) {
         replyStore.addReply(parsed);
       }
-      // 子评论
       if (Array.isArray(raw.replies)) {
         raw.replies.forEach(subRaw => {
           const subParsed = parseReplyItem(subRaw);
@@ -467,56 +457,458 @@
       }
     });
 
-    // 触发 UI 看板与标记刷新
     updateDashboard();
     scheduleDOMScan();
   }
 
-  function hookNetwork() {
-    // 1. Hook fetch
-    const originalFetch = window.fetch;
-    window.fetch = async function (...args) {
-      const response = await originalFetch.apply(this, args);
-      try {
-        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-        if (url && (url.includes('/x/v2/reply') || url.includes('/x/v2/reply/wbi/main') || url.includes('/x/v2/reply/reply'))) {
-          const clone = response.clone();
-          clone.json().then(handleReplyData).catch(() => {});
-        }
-      } catch (err) {}
-      return response;
-    };
+  // 穿透油猴沙箱：向页面主世界注入劫持脚本 + 监听通信事件
+  function injectMainWorldHook() {
+    const script = document.createElement('script');
+    script.textContent = `(${function () {
+      const dispatchData = (json) => {
+        if (!json || json.code !== 0 || !json.data) return;
+        window.dispatchEvent(new CustomEvent('__BILI_REPLY_INTERCEPT__', {
+          detail: JSON.stringify(json)
+        }));
+      };
 
-    // 2. Hook XMLHttpRequest
-    const originalOpen = XMLHttpRequest.prototype.open;
-    const originalSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-      this._url = url;
-      return originalOpen.call(this, method, url, ...rest);
-    };
-
-    XMLHttpRequest.prototype.send = function (...args) {
-      this.addEventListener('load', function () {
+      // 1. Hook 主世界 fetch
+      const rawFetch = window.fetch;
+      window.fetch = async function (...args) {
+        const res = await rawFetch.apply(this, args);
         try {
-          if (this._url && (this._url.includes('/x/v2/reply') || this._url.includes('/x/v2/reply/wbi/main') || this._url.includes('/x/v2/reply/reply'))) {
-            const data = JSON.parse(this.responseText);
-            handleReplyData(data);
+          const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
+          if (url && (url.includes('/x/v2/reply') || url.includes('/x/v2/reply/wbi/main'))) {
+            res.clone().json().then(dispatchData).catch(() => {});
           }
         } catch (e) {}
-      });
-      return originalSend.apply(this, args);
-    };
+        return res;
+      };
+
+      // 2. Hook 主世界 XHR
+      const rawOpen = XMLHttpRequest.prototype.open;
+      const rawSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (m, u, ...rest) {
+        this._bili_url = u;
+        return rawOpen.call(this, m, u, ...rest);
+      };
+      XMLHttpRequest.prototype.send = function (...args) {
+        this.addEventListener('load', function () {
+          try {
+            if (this._bili_url && (this._bili_url.includes('/x/v2/reply') || this._bili_url.includes('/x/v2/reply/wbi/main'))) {
+              dispatchData(JSON.parse(this.responseText));
+            }
+          } catch (e) {}
+        });
+        return rawSend.apply(this, args);
+      };
+    }.toString()})();`;
+
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+
+    // 监听来自主世界的通信事件
+    window.addEventListener('__BILI_REPLY_INTERCEPT__', (e) => {
+      try {
+        const json = JSON.parse(e.detail);
+        handleReplyData(json);
+      } catch (err) {}
+    });
+
+    // 同时在 unsafeWindow（如果存在）挂载劫持作为双重保护
+    const targetWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    if (targetWin && targetWin !== window) {
+      try {
+        const origFetch = targetWin.fetch;
+        targetWin.fetch = async function (...args) {
+          const res = await origFetch.apply(this, args);
+          try {
+            const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
+            if (url && (url.includes('/x/v2/reply') || url.includes('/x/v2/reply/wbi/main'))) {
+              res.clone().json().then(handleReplyData).catch(() => {});
+            }
+          } catch (e) {}
+          return res;
+        };
+      } catch (e) {}
+    }
   }
 
-  hookNetwork();
+  injectMainWorldHook();
 
   // ==========================================
-  // 6. UI 交互看板与评论区元素渲染
+  // 6. 轻量级 MD5 与 WBI 签名算法模块
+  // ==========================================
+
+  const MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+  ];
+
+  function calcMD5(string) {
+    function rotateLeft(lValue, iShiftBits) {
+      return (lValue << iShiftBits) | (lValue >>> (32 - iShiftBits));
+    }
+    function addUnsigned(lX, lY) {
+      const lX8 = (lX & 0x80000000), lY8 = (lY & 0x80000000);
+      const lX4 = (lX & 0x40000000), lY4 = (lY & 0x40000000);
+      const lResult = (lX & 0x3FFFFFFF) + (lY & 0x3FFFFFFF);
+      if (lX4 & lY4) return (lResult ^ 0x80000000 ^ lX8 ^ lY8);
+      if (lX4 | lY4) {
+        if (lResult & 0x40000000) return (lResult ^ 0xC0000000 ^ lX8 ^ lY8);
+        else return (lResult ^ 0x40000000 ^ lX8 ^ lY8);
+      } else return (lResult ^ lX8 ^ lY8);
+    }
+    function F(x, y, z) { return (x & y) | ((~x) & z); }
+    function G(x, y, z) { return (x & z) | (y & (~z)); }
+    function H(x, y, z) { return (x ^ y ^ z); }
+    function I(x, y, z) { return (y ^ (x | (~z))); }
+    function FF(a, b, c, d, x, s, ac) {
+      a = addUnsigned(a, addUnsigned(addUnsigned(F(b, c, d), x), ac));
+      return addUnsigned(rotateLeft(a, s), b);
+    }
+    function GG(a, b, c, d, x, s, ac) {
+      a = addUnsigned(a, addUnsigned(addUnsigned(G(b, c, d), x), ac));
+      return addUnsigned(rotateLeft(a, s), b);
+    }
+    function HH(a, b, c, d, x, s, ac) {
+      a = addUnsigned(a, addUnsigned(addUnsigned(H(b, c, d), x), ac));
+      return addUnsigned(rotateLeft(a, s), b);
+    }
+    function II(a, b, c, d, x, s, ac) {
+      a = addUnsigned(a, addUnsigned(addUnsigned(I(b, c, d), x), ac));
+      return addUnsigned(rotateLeft(a, s), b);
+    }
+
+    string = unescape(encodeURIComponent(string));
+    const lMessageLength = string.length;
+    const lNumberOfWords = (((lMessageLength + 8) - ((lMessageLength + 8) % 64)) / 64 + 1) * 16;
+    const x = Array(lNumberOfWords - 1);
+    let lBytePosition = 0, lByteCount = 0;
+    while (lByteCount < lMessageLength) {
+      const lWordCount = (lByteCount - (lByteCount % 4)) / 4;
+      lBytePosition = (lByteCount % 4) * 8;
+      x[lWordCount] = (x[lWordCount] | (string.charCodeAt(lByteCount) << lBytePosition));
+      lByteCount++;
+    }
+    const lWordCount = (lByteCount - (lByteCount % 4)) / 4;
+    lBytePosition = (lByteCount % 4) * 8;
+    x[lWordCount] = (x[lWordCount] | (0x80 << lBytePosition));
+    x[lNumberOfWords - 2] = lMessageLength << 3;
+    x[lNumberOfWords - 1] = lMessageLength >>> 29;
+
+    let a = 0x67452301, b = 0xEFCDAB89, c = 0x98BADCFE, d = 0x10325476;
+    for (let k = 0; k < x.length; k += 16) {
+      const AA = a, BB = b, CC = c, DD = d;
+      a = FF(a, b, c, d, x[k + 0], 7, 0xD76AA478); d = FF(d, a, b, c, x[k + 1], 12, 0xE8C7B756);
+      c = FF(c, d, a, b, x[k + 2], 17, 0x242070DB); b = FF(b, c, d, a, x[k + 3], 22, 0xC1BDCEEE);
+      a = FF(a, b, c, d, x[k + 4], 7, 0xF57C0FAF); d = FF(d, a, b, c, x[k + 5], 12, 0x4787C62A);
+      c = FF(c, d, a, b, x[k + 6], 17, 0xA8304613); b = FF(b, c, d, a, x[k + 7], 22, 0xFD469501);
+      a = FF(a, b, c, d, x[k + 8], 7, 0x698098D8); d = FF(d, a, b, c, x[k + 9], 12, 0x8B44F7AF);
+      c = FF(c, d, a, b, x[k + 10], 17, 0xFFFF5BB1); b = FF(b, c, d, a, x[k + 11], 22, 0x895CD7BE);
+      a = FF(a, b, c, d, x[k + 12], 7, 0x6B901122); d = FF(d, a, b, c, x[k + 13], 12, 0xFD987193);
+      c = FF(c, d, a, b, x[k + 14], 17, 0xA679438E); b = FF(b, c, d, a, x[k + 15], 22, 0x49B40821);
+
+      a = GG(a, b, c, d, x[k + 1], 5, 0xF61E2562); d = GG(d, a, b, c, x[k + 6], 9, 0xC040B340);
+      c = GG(c, d, a, b, x[k + 11], 14, 0x265E5A51); b = GG(b, c, d, a, x[k + 0], 20, 0xE9B6C7AA);
+      a = GG(a, b, c, d, x[k + 5], 5, 0xD62F105D); d = GG(d, a, b, c, x[k + 10], 9, 0x2441453);
+      c = GG(c, d, a, b, x[k + 15], 14, 0xD8A1E681); b = GG(b, c, d, a, x[k + 4], 20, 0xE7D3FBC8);
+      a = GG(a, b, c, d, x[k + 9], 5, 0x21E1CDE6); d = GG(d, a, b, c, x[k + 14], 9, 0xC33707D6);
+      c = GG(c, d, a, b, x[k + 3], 14, 0xF4D50D87); b = GG(b, c, d, a, x[k + 8], 20, 0x455A14ED);
+      a = GG(a, b, c, d, x[k + 13], 5, 0xA9E3E905); d = GG(d, a, b, c, x[k + 2], 9, 0xFCEFA3F8);
+      c = GG(c, d, a, b, x[k + 7], 14, 0x676F02D9); b = GG(b, c, d, a, x[k + 12], 20, 0x8D2A4C8A);
+
+      a = HH(a, b, c, d, x[k + 5], 4, 0xFFFA3942); d = HH(d, a, b, c, x[k + 8], 11, 0x8771F681);
+      c = HH(c, d, a, b, x[k + 11], 16, 0x6D9D6122); b = HH(b, c, d, a, x[k + 14], 23, 0xFDE5380C);
+      a = HH(a, b, c, d, x[k + 1], 4, 0xA4BEEA44); d = HH(d, a, b, c, x[k + 4], 11, 0x4BDECFA9);
+      c = HH(c, d, a, b, x[k + 7], 16, 0xF6BB4B60); b = HH(b, c, d, a, x[k + 10], 23, 0xBEBFBC70);
+      a = HH(a, b, c, d, x[k + 13], 4, 0x289B7EC6); d = HH(d, a, b, c, x[k + 0], 11, 0xEAA127FA);
+      c = HH(c, d, a, b, x[k + 3], 16, 0xD4EF3085); b = HH(b, c, d, a, x[k + 6], 23, 0x4881D05);
+      a = HH(a, b, c, d, x[k + 9], 4, 0xD9D4D039); d = HH(d, a, b, c, x[k + 12], 11, 0xE6DB99E5);
+      c = HH(c, d, a, b, x[k + 15], 16, 0x1FA27CF8); b = HH(b, c, d, a, x[k + 2], 23, 0xC4AC5665);
+
+      a = II(a, b, c, d, x[k + 0], 6, 0xF4292244); d = II(d, a, b, c, x[k + 7], 10, 0x432AFF97);
+      c = II(c, d, a, b, x[k + 14], 15, 0xAB9423A7); b = II(b, c, d, a, x[k + 5], 21, 0xFC93A039);
+      a = II(a, b, c, d, x[k + 12], 6, 0x655B59C3); d = II(d, a, b, c, x[k + 3], 10, 0x8F0CCC92);
+      c = II(c, d, a, b, x[k + 10], 15, 0xFFEFF47D); b = II(b, c, d, a, x[k + 1], 21, 0x85845DD1);
+      a = II(a, b, c, d, x[k + 8], 6, 0x6FA87E4F); d = II(d, a, b, c, x[k + 15], 10, 0xFE2CE6E0);
+      c = II(c, d, a, b, x[k + 6], 15, 0xA3014314); b = II(b, c, d, a, x[k + 13], 21, 0x4E0811A1);
+      a = II(a, b, c, d, x[k + 4], 6, 0xF7537E82); d = II(d, a, b, c, x[k + 11], 10, 0xBD3AF235);
+      c = II(c, d, a, b, x[k + 2], 15, 0x2AD7D2BB); b = II(b, c, d, a, x[k + 9], 21, 0xEB86D391);
+
+      a = addUnsigned(a, AA); b = addUnsigned(b, BB);
+      c = addUnsigned(c, CC); d = addUnsigned(d, DD);
+    }
+    const toHex = (val) => {
+      let str = "";
+      for (let i = 0; i <= 3; i++) {
+        const byte = (val >>> (i * 8)) & 255;
+        str += ("0" + byte.toString(16)).slice(-2);
+      }
+      return str;
+    };
+    return (toHex(a) + toHex(b) + toHex(c) + toHex(d)).toLowerCase();
+  }
+
+  // 获取 Wbi 签名密钥
+  async function getWbiKeys() {
+    try {
+      const res = await fetch('https://api.bilibili.com/x/web-interface/nav', { credentials: 'include' });
+      const json = await res.json();
+      if (json.code === 0 && json.data?.wbi_img) {
+        const img = json.data.wbi_img.img_url.split('/').pop().split('.')[0];
+        const sub = json.data.wbi_img.sub_url.split('/').pop().split('.')[0];
+        return { img, sub };
+      }
+    } catch (e) {}
+    // 降级兜底备用 key
+    return { img: '67546de4eed44a2cad6625287a5454cc', sub: '8484e16101f341a8832d1ee1081f04f5' };
+  }
+
+  // 计算 Wbi 请求参数
+  async function signWbiQuery(params) {
+    const { img, sub } = await getWbiKeys();
+    const rawKey = img + sub;
+    let mixinKey = '';
+    MIXIN_KEY_ENC_TAB.forEach(n => {
+      if (n < rawKey.length) mixinKey += rawKey[n];
+    });
+    mixinKey = mixinKey.slice(0, 32);
+
+    const wts = Math.round(Date.now() / 1000);
+    const newParams = { ...params, wts };
+
+    // 排序
+    const sortedKeys = Object.keys(newParams).sort();
+    let queryStr = '';
+    for (const k of sortedKeys) {
+      const val = String(newParams[k]).replace(/[!'()*]/g, '');
+      queryStr += `${encodeURIComponent(k)}=${encodeURIComponent(val)}&`;
+    }
+    queryStr = queryStr.slice(0, -1);
+
+    const w_rid = calcMD5(queryStr + mixinKey);
+    return `${queryStr}&w_rid=${w_rid}`;
+  }
+
+  // ==========================================
+  // 7. UP主置信度与通稿矩阵排查引擎
+  // ==========================================
+
+  async function checkUpAndMatrixCredibility() {
+    // 1. 获取当前视频标题与 UP 信息
+    const titleEl = document.querySelector('h1.video-title') || document.querySelector('.video-title');
+    let title = (titleEl ? titleEl.innerText : document.title) || '';
+    title = title.replace(/_哔哩哔哩_bilibili.*/, '').trim();
+
+    const upEl = document.querySelector('.up-name') || document.querySelector('.up-detail .name') || document.querySelector('.username');
+    const currentUp = (upEl ? upEl.innerText.trim() : '') || '当前UP主';
+    const currentBvid = (location.pathname.match(/(BV\w+)/i) || [])[1] || '';
+
+    // 提取清洗核心检索词（去除括号、井号与标签）
+    const cleanKeyword = title
+      .replace(/【.*?】|\[.*?\]|#.*?#|（.*?）|\(.*?\)/g, ' ')
+      .replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .slice(0, 4)
+      .join(' ') || title.slice(0, 15);
+
+    openMatrixReportModal({
+      state: 'loading',
+      title,
+      cleanKeyword,
+      currentUp,
+      currentBvid
+    });
+
+    try {
+      // 2. 发起签名搜索接口请求
+      const signedQuery = await signWbiQuery({
+        keyword: cleanKeyword,
+        search_type: 'video',
+        order: 'totalrank',
+        page: 1,
+        page_size: 30
+      });
+
+      const resp = await fetch(`https://api.bilibili.com/x/web-interface/wbi/search/type?${signedQuery}`, {
+        credentials: 'include'
+      });
+      const data = await resp.json();
+
+      if (data.code !== 0 || !data.data?.result) {
+        throw new Error(data.message || '获取搜索数据失败');
+      }
+
+      const results = data.data.result;
+      const similarVideos = [];
+
+      // 3. 计算标题重合度与矩阵特征
+      const currentShingles = replyStore.createShingles(title);
+
+      for (const item of results) {
+        // 排除自身
+        if (item.bvid === currentBvid) continue;
+        const itemTitle = (item.title || '').replace(/<[^>]+>/g, '').trim();
+        const itemShingles = replyStore.createShingles(itemTitle);
+        const similarity = replyStore.calcJaccard(currentShingles, itemShingles);
+
+        // 如果标题相似度高于 0.45 或包含完全相同的核心通稿句式
+        if (similarity >= 0.45 || (cleanKeyword.length >= 6 && itemTitle.includes(cleanKeyword))) {
+          similarVideos.push({
+            title: itemTitle,
+            author: item.author,
+            bvid: item.bvid,
+            pubdate: item.pubdate ? new Date(item.pubdate * 1000).toLocaleDateString() : '未知',
+            play: item.play || 0,
+            similarity: Math.round(similarity * 100)
+          });
+        }
+      }
+
+      // 按相似度降序排序
+      similarVideos.sort((a, b) => b.similarity - a.similarity);
+
+      // 4. 判定置信度等级
+      let level = 'safe';
+      let verdictTitle = '🟢 置信度高 (独立原创UP主)';
+      let verdictDesc = '全站未检索到高度雷同标题通稿，内容具有较高的独立性与独创性。';
+
+      if (similarVideos.length >= 3) {
+        level = 'danger';
+        verdictTitle = '🔴 高危通稿矩阵 (疑似公关买量/矩阵号批量洗版)';
+        verdictDesc = `检测到全站至少有 ${similarVideos.length} 个不同账号在近期发布高度雷同标题的视频！具有强烈的公关通稿铺量、商战抹黑或MCN矩阵引战嫌疑。`;
+      } else if (similarVideos.length >= 1) {
+        level = 'warn';
+        verdictTitle = '🟡 中度可疑 (存在撞题或跟风炒作)';
+        verdictDesc = `发现 ${similarVideos.length} 个雷同标题视频，可能为同行热点撞题、跟风炒作或素材二次搬运。`;
+      }
+
+      openMatrixReportModal({
+        state: 'done',
+        title,
+        cleanKeyword,
+        currentUp,
+        currentBvid,
+        level,
+        verdictTitle,
+        verdictDesc,
+        similarVideos
+      });
+
+    } catch (err) {
+      openMatrixReportModal({
+        state: 'error',
+        title,
+        cleanKeyword,
+        currentUp,
+        error: err.message
+      });
+    }
+  }
+
+  // 渲染矩阵排查报告模态弹窗
+  function openMatrixReportModal(data) {
+    let modal = document.getElementById('bili-matrix-modal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'bili-matrix-modal';
+      document.body.appendChild(modal);
+    }
+
+    if (data.state === 'loading') {
+      modal.innerHTML = `
+        <div class="bili-modal-content" style="width: 580px;">
+          <div class="bili-modal-header">
+            <span>🔍 UP主置信度与通稿矩阵排查</span>
+            <button class="bili-dash-btn" onclick="document.getElementById('bili-matrix-modal').remove()">✕</button>
+          </div>
+          <div class="bili-modal-body" style="text-align: center; padding: 40px 20px;">
+            <div style="font-size: 32px; margin-bottom: 12px; animation: spin 1s infinite linear;">🔄</div>
+            <div style="font-weight: 600; font-size: 15px;">正在全站检索雷同视频与通稿矩阵...</div>
+            <div style="color: #888; font-size: 12px; margin-top: 6px;">正在比对标题: "${data.cleanKeyword}"</div>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    if (data.state === 'error') {
+      modal.innerHTML = `
+        <div class="bili-modal-content" style="width: 580px;">
+          <div class="bili-modal-header">
+            <span>🔍 UP主置信度与通稿矩阵排查</span>
+            <button class="bili-dash-btn" onclick="document.getElementById('bili-matrix-modal').remove()">✕</button>
+          </div>
+          <div class="bili-modal-body" style="padding: 24px;">
+            <div style="color: #f5222d; font-weight: 600; margin-bottom: 8px;">排查请求失败：${data.error}</div>
+            <div style="color: #888;">可能触发了B站临时搜索风控或网络波动，请稍后再试。</div>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    // Done 状态渲染
+    const badgeBg = data.level === 'danger' ? '#f5222d' : data.level === 'warn' ? '#faad14' : '#52c41a';
+    modal.innerHTML = `
+      <div class="bili-modal-content" style="width: 640px;">
+        <div class="bili-modal-header">
+          <span>🔍 UP主置信度与通稿矩阵排查报告</span>
+          <button class="bili-dash-btn" onclick="document.getElementById('bili-matrix-modal').remove()">✕</button>
+        </div>
+        <div class="bili-modal-body">
+          <div style="background: #f6f7f8; padding: 12px 14px; border-radius: 8px;">
+            <div style="font-weight: 600; font-size: 14px; margin-bottom: 4px;">当前视频: ${data.title}</div>
+            <div style="color: #61666d; font-size: 12px;">发布者: <b>${data.currentUp}</b> (BV: ${data.currentBvid})</div>
+          </div>
+
+          <div style="border-left: 4px solid ${badgeBg}; background: #fafafa; padding: 12px 14px; border-radius: 4px;">
+            <div style="font-weight: 700; font-size: 15px; color: ${badgeBg}; margin-bottom: 4px;">${data.verdictTitle}</div>
+            <div style="color: #555; line-height: 1.5;">${data.verdictDesc}</div>
+          </div>
+
+          <div class="bili-setting-group">
+            <div class="bili-setting-title">全站雷同标题与疑似矩阵视频清单 (${data.similarVideos.length})</div>
+            ${data.similarVideos.length === 0 ? `
+              <div style="color: #52c41a; padding: 12px; text-align: center;">✅ 全站暂未发现其他同质化雷同通稿视频</div>
+            ` : `
+              <div class="bili-rule-list" style="max-height: 240px; padding: 0;">
+                ${data.similarVideos.map(v => `
+                  <div style="padding: 10px 12px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;">
+                    <div style="flex: 1; margin-right: 12px;">
+                      <a href="https://www.bilibili.com/video/${v.bvid}" target="_blank" style="color: #00AEEC; font-weight: 500; text-decoration: none; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;">
+                        ${v.title}
+                      </a>
+                      <div style="font-size: 11px; color: #888; margin-top: 4px;">
+                        UP主: <b>${v.author}</b> | 发布: ${v.pubdate} | 播放: ${v.play}
+                      </div>
+                    </div>
+                    <span style="background: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; white-space: nowrap;">
+                      雷同度 ${v.similarity}%
+                    </span>
+                  </div>
+                `).join('')}
+              </div>
+            `}
+          </div>
+        </div>
+        <div class="bili-modal-footer">
+          <button class="bili-btn-primary" onclick="document.getElementById('bili-matrix-modal').remove()">关闭</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // 8. UI 交互看板与评论区 DOM 回退解析
   // ==========================================
 
   const STYLES = `
-    /* 黑流量检测器悬浮看板 */
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     #bili-detector-dashboard {
       position: fixed;
       bottom: 80px;
@@ -619,9 +1011,6 @@
       font-size: 12px;
       color: #61666d;
     }
-    .bili-filter-toggle input {
-      cursor: pointer;
-    }
 
     /* 评论行角标 */
     .bili-traffic-tag {
@@ -655,7 +1044,6 @@
       border-color: #91d5ff;
     }
 
-    /* 折叠状态样式 */
     .bili-reply-folded {
       opacity: 0.35;
       transition: opacity 0.2s;
@@ -664,8 +1052,8 @@
       opacity: 0.85;
     }
 
-    /* 设置模态窗口 */
-    #bili-detector-modal {
+    /* 弹窗通用样式 */
+    #bili-detector-modal, #bili-matrix-modal {
       position: fixed;
       top: 0;
       left: 0;
@@ -680,7 +1068,7 @@
     .bili-modal-content {
       background: #fff;
       width: 520px;
-      max-width: 90vw;
+      max-width: 92vw;
       border-radius: 12px;
       overflow: hidden;
       box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
@@ -750,9 +1138,7 @@
       cursor: pointer;
       font-weight: 500;
     }
-    .bili-btn-primary:hover {
-      background: #009cd3;
-    }
+    .bili-btn-primary:hover { background: #009cd3; }
     .bili-btn-default {
       background: #fff;
       color: #61666d;
@@ -761,8 +1147,21 @@
       border-radius: 6px;
       cursor: pointer;
     }
-    .bili-btn-default:hover {
-      background: #f6f7f8;
+    .bili-btn-default:hover { background: #f6f7f8; }
+    .bili-btn-action {
+      background: #fff0f6;
+      color: #eb2f96;
+      border: 1px solid #ffadd2;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      width: 100%;
+      text-align: center;
+    }
+    .bili-btn-action:hover {
+      background: #eb2f96;
+      color: #fff;
     }
   `;
 
@@ -774,7 +1173,6 @@
     (document.head || document.documentElement).appendChild(styleEl);
   }
 
-  // 渲染悬浮看板
   function renderDashboard() {
     if (document.getElementById('bili-detector-dashboard')) return;
     injectStyles();
@@ -809,6 +1207,11 @@
         <div class="bili-stat-row" style="font-size: 11px; color: #888;">
           <span>🤖 模板水军聚类: <b id="cnt-cluster">0</b> 组</span>
         </div>
+
+        <button class="bili-btn-action" id="bili-btn-check-up">
+          🔍 排查UP主与通稿矩阵
+        </button>
+
         <div class="bili-filter-toggle">
           <label style="display:flex;align-items:center;gap:4px;cursor:pointer;">
             <input type="checkbox" id="bili-chk-fold"> 自动淡化/折叠可疑评论
@@ -819,7 +1222,6 @@
 
     document.body.appendChild(dash);
 
-    // 绑定事件
     const btnMin = dash.querySelector('#bili-btn-minimize');
     btnMin.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -839,6 +1241,11 @@
       openSettingsModal();
     });
 
+    dash.querySelector('#bili-btn-check-up').addEventListener('click', (e) => {
+      e.stopPropagation();
+      checkUpAndMatrixCredibility();
+    });
+
     const chkFold = dash.querySelector('#bili-chk-fold');
     chkFold.checked = configMgr.get().foldSuspects;
     chkFold.addEventListener('change', () => {
@@ -847,7 +1254,6 @@
     });
   }
 
-  // 更新看板统计数据
   function updateDashboard() {
     renderDashboard();
     const totalEl = document.getElementById('bili-stat-total');
@@ -878,7 +1284,7 @@
     document.getElementById('cnt-cluster').textContent = String(replyStore.clusters.filter(c => c.rpids.length >= 3).length);
 
     if (total === 0) {
-      ratioEl.textContent = '0.0% (正常)';
+      ratioEl.textContent = '0.0% (等待中)';
       ratioEl.className = 'bili-stat-badge safe';
     } else {
       const ratio = (suspectCount / total) * 100;
@@ -894,7 +1300,7 @@
   }
 
   // ==========================================
-  // 7. 评论区 DOM 观察与无缝标记注入
+  // 9. DOM 观察与主动文本解析回退 (确保绝不显示 0%)
   // ==========================================
 
   let scanTimer = null;
@@ -903,23 +1309,34 @@
     scanTimer = setTimeout(scanAndTagComments, 200);
   }
 
-  // 获取评论节点对应的 rpid 与 text
-  function findCommentDetails(node) {
-    // 兼容新版 Web Components 与旧版 DOM 树
+  // 从 DOM 节点深度提取评论要素（穿透 Shadow DOM 与普通节点）
+  function extractCommentFromNode(node) {
+    const root = node.shadowRoot || node;
     let rpid = node.getAttribute('data-id') || node.getAttribute('data-rpid') || node.id;
     if (!rpid) {
-      const sub = node.querySelector('[data-id], [data-rpid]');
+      const sub = root.querySelector('[data-id], [data-rpid]');
       if (sub) rpid = sub.getAttribute('data-id') || sub.getAttribute('data-rpid');
     }
 
-    // 匹配用户名或文本
-    const userEl = node.querySelector('.user-name, #user-name, .name, [data-user-id]');
-    const contentEl = node.querySelector('.reply-content, #content, .text, .root-reply-content');
+    const userEl = root.querySelector('.user-name, #user-name, .name, [data-user-id]');
+    const contentEl = root.querySelector('.reply-content, #content, .text, .root-reply-content');
+    const uname = userEl ? userEl.innerText.trim() : '';
+    let text = contentEl ? contentEl.innerText.trim() : '';
+
+    // 如果未定位到特定 contentEl，降级从 innerText 提取
+    if (!text && node.innerText) {
+      const lines = node.innerText.split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length > 1) {
+        text = lines.slice(1).join(' ');
+      }
+    }
+
     return {
       rpid: rpid ? String(rpid) : null,
       userEl,
       contentEl,
-      text: contentEl ? contentEl.innerText.trim() : ''
+      uname,
+      text
     };
   }
 
@@ -927,40 +1344,53 @@
     const cfg = configMgr.get();
     if (!cfg.enabled) return;
 
-    // 匹配主流 B 站评论节点：
-    // 新版 WebComponent: bili-comment-renderer, bili-comment-reply-renderer
-    // 经典版: .reply-item, .sub-reply-item
-    const candidates = document.querySelectorAll(`
+    // 适配所有已知 B 站评论容器
+    const commentNodes = document.querySelectorAll(`
+      bili-comment-thread-renderer,
       bili-comment-renderer,
       bili-comment-reply-renderer,
       .reply-item,
       .sub-reply-item
     `);
 
-    candidates.forEach(node => {
-      const { rpid, userEl, contentEl, text } = findCommentDetails(node);
+    let newFound = false;
 
-      // 寻找对应的内存对象
+    commentNodes.forEach(node => {
+      const { rpid, userEl, contentEl, uname, text } = extractCommentFromNode(node);
+      if (!text) return;
+
+      // 寻找内存中已有的评论对象
       let replyData = null;
       if (rpid && replyStore.replies.has(rpid)) {
         replyData = replyStore.replies.get(rpid);
-      } else if (text) {
-        // 降级：若未获得直接 rpid，通过文本片段定位
-        for (const [id, r] of replyStore.replies.entries()) {
-          if (r.message && (r.message === text || text.includes(r.message.slice(0, 20)))) {
-            replyData = r;
-            break;
-          }
-        }
+      } else {
+        // 主动兜底回退：如果网络拦截未覆盖，直接将 DOM 中的评论文本转换为内存对象！
+        const synthId = rpid || 'synth_' + calcMD5(uname + '_' + text).slice(0, 16);
+        replyData = {
+          rpid: synthId,
+          mid: 0,
+          uname: uname || '路人用户',
+          avatar: '',
+          level: 3,
+          message: text,
+          device: '',
+          location: '',
+          like: 0,
+          rcount: 0,
+          ctime: Math.round(Date.now() / 1000)
+        };
+        replyStore.addReply(replyData);
+        newFound = true;
       }
 
       if (!replyData) return;
 
       const analysis = detector.analyze(replyData);
-      const targetHeader = userEl || node.querySelector('.user-info') || node;
+      const root = node.shadowRoot || node;
+      const targetHeader = userEl || root.querySelector('.user-info') || root;
 
-      // 移除旧标签
-      const oldTag = node.querySelector('.bili-traffic-tag');
+      // 移除已存在的标签
+      const oldTag = root.querySelector('.bili-traffic-tag');
       if (oldTag) oldTag.remove();
 
       if (analysis.isSuspect) {
@@ -986,17 +1416,15 @@
         tag.textContent = `${mainTagText} (${analysis.score}分)`;
         tag.title = `【判定依据】\n` + analysis.reasons.join('\n');
 
-        // 点击展开详情提示
         tag.addEventListener('click', (e) => {
           e.stopPropagation();
-          alert(`【黑流量检测详情】\n账号: ${replyData.uname} (Lv${replyData.level})\n综合危险分: ${analysis.score}\n\n命中规则:\n${analysis.reasons.join('\n')}`);
+          alert(`【黑流量检测详情】\n账号: ${replyData.uname} (Lv${replyData.level})\n综合风险分: ${analysis.score}\n\n命中规则:\n${analysis.reasons.join('\n')}`);
         });
 
         if (targetHeader && targetHeader.parentNode) {
           targetHeader.parentNode.insertBefore(tag, targetHeader.nextSibling);
         }
 
-        // 自动折叠处理
         if (cfg.foldSuspects && analysis.score >= cfg.foldThreshold) {
           node.classList.add('bili-reply-folded');
         } else {
@@ -1006,9 +1434,13 @@
         node.classList.remove('bili-reply-folded');
       }
     });
+
+    if (newFound) {
+      updateDashboard();
+    }
   }
 
-  // 监听 DOM 变化持续处理分页加载的评论
+  // 监听 DOM 树变化
   const domObserver = new MutationObserver(() => {
     scheduleDOMScan();
   });
@@ -1019,7 +1451,7 @@
   });
 
   // ==========================================
-  // 8. 规则设置与自定义词库弹窗面板
+  // 10. 规则设置模态窗口
   // ==========================================
 
   function openSettingsModal() {
@@ -1092,32 +1524,24 @@
 
     document.body.appendChild(modal);
 
-    // 事件监听
     const closeModal = () => modal.remove();
     modal.querySelector('#bili-modal-close').addEventListener('click', closeModal);
     modal.addEventListener('click', (e) => {
       if (e.target === modal) closeModal();
     });
 
-    // 添加自定义规则
     modal.querySelector('#btn-add-rule').addEventListener('click', () => {
       const pattern = modal.querySelector('#inp-new-pattern').value.trim();
       const isRegex = modal.querySelector('#chk-is-regex').checked;
       if (!pattern) return;
 
       const rules = cfg.customRules || [];
-      rules.push({
-        pattern,
-        name: pattern,
-        isRegex,
-        score: 45
-      });
+      rules.push({ pattern, name: pattern, isRegex, score: 45 });
       configMgr.update({ customRules: rules });
       closeModal();
       openSettingsModal();
     });
 
-    // 删除规则
     modal.querySelectorAll('.btn-del-rule').forEach(btn => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.getAttribute('data-idx'));
@@ -1129,7 +1553,6 @@
       });
     });
 
-    // 保存配置
     modal.querySelector('#btn-save-settings').addEventListener('click', () => {
       const threshold = parseInt(modal.querySelector('#inp-threshold').value) || 60;
       configMgr.update({
@@ -1146,7 +1569,6 @@
       scheduleDOMScan();
     });
 
-    // 恢复默认
     modal.querySelector('#btn-reset-defaults').addEventListener('click', () => {
       if (confirm('确认恢复默认检测规则与配置？')) {
         configMgr.update(DEFAULT_CONFIG);
@@ -1160,15 +1582,16 @@
   // 注册油猴菜单指令
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('⚙️ 打开黑流量检测设置', openSettingsModal);
+    GM_registerMenuCommand('🔍 排查当前UP主与通稿矩阵', checkUpAndMatrixCredibility);
     GM_registerMenuCommand('🔄 重新扫描当前评论区', () => {
       updateDashboard();
       scheduleDOMScan();
     });
   }
 
-  // 页面加载完成后初次初始化看板
   window.addEventListener('DOMContentLoaded', () => {
     renderDashboard();
     updateDashboard();
+    scheduleDOMScan();
   });
 })();
